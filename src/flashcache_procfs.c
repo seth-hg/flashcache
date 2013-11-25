@@ -2,6 +2,8 @@
  *  flashcache_conf.c
  *  FlashCache: Device mapper target for block-level disk caching
  *
+ *  Copyright 2013 Sai Huang (seth.hg@gmail.com)
+ *
  *  Copyright 2010 Facebook, Inc.
  *  Author: Mohan Srinivasan (mohan@fb.com)
  *
@@ -223,6 +225,31 @@ flashcache_lru_hot_pct_sysctl(ctl_table *table, int write,
 	return 0;
 }
 
+/* ADDED by seth for LARC */
+extern void flashcache_reclaim_larc_switch(struct cache_c *dmc);
+
+static int
+flashcache_larc_enable_sysctl(ctl_table *table, int write,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,32)
+			       struct file *file, 
+#endif
+			       void __user *buffer, 
+			       size_t *length, loff_t *ppos)
+{
+	struct cache_c *dmc = (struct cache_c *)table->extra1;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,32)
+        proc_dointvec(table, write, file, buffer, length, ppos);
+#else
+        proc_dointvec(table, write, buffer, length, ppos);
+#endif
+	if (write)
+		flashcache_reclaim_larc_switch(dmc);
+
+	return 0;
+}
+/* */
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 #define CTL_UNNUMBERED			-2
 #endif
@@ -232,7 +259,7 @@ flashcache_lru_hot_pct_sysctl(ctl_table *table, int write,
  * entries - zero padded at the end ! Therefore the NUM_*_SYSCTLS
  * is 1 more than then number of sysctls.
  */
-#define FLASHCACHE_NUM_WRITEBACK_SYSCTLS	22
+#define FLASHCACHE_NUM_WRITEBACK_SYSCTLS	22+3
 
 static struct flashcache_writeback_sysctl_table {
 	struct ctl_table_header *sysctl_header;
@@ -465,6 +492,38 @@ static struct flashcache_writeback_sysctl_table {
 			.mode		= 0644,
 			.proc_handler	= &proc_dointvec,
 		},
+		/* ADDED by seth for LARC */
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_enable",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &flashcache_larc_enable_sysctl,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.strategy	= &sysctl_intvec,
+#endif
+		},
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_read_only",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &proc_dointvec,
+		},
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_candidate_pct",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &proc_dointvec,
+		},
+		/* */
 	},
 	.dev = {
 		{
@@ -506,7 +565,7 @@ static struct flashcache_writeback_sysctl_table {
  * entries - zero padded at the end ! Therefore the NUM_*_SYSCTLS
  * is 1 more than then number of sysctls.
  */
-#define FLASHCACHE_NUM_WRITETHROUGH_SYSCTLS	11
+#define FLASHCACHE_NUM_WRITETHROUGH_SYSCTLS	11+3
 
 static struct flashcache_writethrough_sysctl_table {
 	struct ctl_table_header *sysctl_header;
@@ -631,6 +690,38 @@ static struct flashcache_writethrough_sysctl_table {
 			.strategy	= &sysctl_intvec,
 #endif
 		},
+		/* ADDED by seth for LARC */
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_enable",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &flashcache_larc_enable_sysctl,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.strategy	= &sysctl_intvec,
+#endif
+		},
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_read_only",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &proc_dointvec,
+		},
+		{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33)
+			.ctl_name	= CTL_UNNUMBERED,
+#endif
+			.procname	= "larc_candidate_pct",
+			.maxlen		= sizeof(int),
+			.mode		= 0644,
+			.proc_handler	= &proc_dointvec,
+		},
+		/* */
 	},
 	.dev = {
 		{
@@ -714,6 +805,14 @@ flashcache_find_sysctl_data(struct cache_c *dmc, ctl_table *vars)
 		return &dmc->sysctl_lru_hot_pct;
 	else if (strcmp(vars->procname, "new_style_write_merge") == 0)
 		return &dmc->sysctl_new_style_write_merge;
+	/* ADDED by seth for LARC */
+	else if (strcmp(vars->procname, "larc_enable") == 0) 
+		return &dmc->sysctl_larc_enable;
+	else if (strcmp(vars->procname, "larc_read_only") == 0) 
+		return &dmc->sysctl_larc_read_only;
+	else if (strcmp(vars->procname, "larc_candidate_pct") == 0) 
+		return &dmc->sysctl_larc_candidate_pct;
+	/* */
 	printk(KERN_ERR "flashcache_find_sysctl_data: Unknown sysctl %s\n", vars->procname);
 	panic("flashcache_find_sysctl_data: Unknown sysctl %s\n", vars->procname);
 	return NULL;

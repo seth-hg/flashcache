@@ -2,6 +2,8 @@
  *  flashcache.h
  *  FlashCache: Device mapper target for block-level disk caching
  *
+ *  Copyright 2013 Sai Huang (seth.hg@gmail.com)
+ *
  *  Copyright 2010 Facebook, Inc.
  *  Author: Mohan Srinivasan (mohan@fb.com)
  *
@@ -187,6 +189,11 @@ struct cache_set {
 #define NUM_BLOCK_HASH_BUCKETS		512
 	u_int16_t		hash_buckets[NUM_BLOCK_HASH_BUCKETS];
 	u_int16_t		invalid_head;
+	/* ADDED by seth for LARC */
+	u_int16_t		candidate_lru_head, candidate_lru_tail;
+	u_int16_t		candidate_lru_capacity;
+	u_int16_t		candidate_lru_len;
+	/* */
 };
 
 struct flashcache_errors {
@@ -261,6 +268,14 @@ struct sequential_io {
 							 * (currently we do linear search, we could consider hashed */
 								
 	
+/* ADDED by seth for LARC */
+struct candidate {
+	u_int8_t    state;
+	sector_t    dbn;	/* block number of the candidate block */
+	u_int16_t   lru_prev, lru_next;
+} __attribute__((packed));
+/* */
+
 /*
  * Cache context
  */
@@ -385,11 +400,25 @@ struct cache_c {
 	int sysctl_lru_hot_pct;
 	int sysctl_lru_promote_thresh;
 	int sysctl_new_style_write_merge;
+	/* ADDED by seth */
+	int sysctl_larc_enable;
+	int sysctl_larc_read_only;
+	/* capacity of candidate list, in percentage of cache size 
+	 * 0 means adaptive and LARC will dynamically adjust it.
+	 * */
+	int sysctl_larc_candidate_pct;
 
 	/* Sequential I/O spotter */
 	struct sequential_io	seq_recent_ios[SEQUENTIAL_TRACKER_QUEUE_DEPTH];
 	struct sequential_io	*seq_io_head;
 	struct sequential_io 	*seq_io_tail;
+
+	/* ADDED by seth for LARC
+	 * */
+	unsigned int candidate_min_capacity;
+	unsigned int candidate_max_capacity;
+	struct candidate *candidates;
+	/* */
 };
 
 /* kcached/pending job states */

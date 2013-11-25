@@ -543,3 +543,44 @@ flashcache_lru_accessed(struct cache_c *dmc, int index)
 			flashcache_reclaim_move_to_mru(dmc, index);
 	}
 }
+
+/* ADDED by seth for LARC */
+static void flashcache_larc_init(struct cache_c *dmc)
+{
+	int i, j, start_index, end_index;
+
+	/* reset candidate list */
+	for (i = 0 ; i < dmc->num_sets ; i++) {
+		start_index = i * dmc->assoc;
+		end_index = start_index + dmc->assoc;
+		spin_lock(&dmc->cache_sets[i].set_spin_lock);
+		dmc->cache_sets[i].candidate_lru_head = FLASHCACHE_NULL;
+		dmc->cache_sets[i].candidate_lru_tail = FLASHCACHE_NULL;
+		dmc->cache_sets[i].candidate_lru_len = 0;
+		dmc->cache_sets[i].candidate_lru_capacity = dmc->candidate_min_capacity;
+		for (j = start_index; j < end_index; j++) {
+			dmc->candidates[j].dbn = 0;
+			dmc->candidates[j].state = INVALID;
+			dmc->candidates[j].lru_next = FLASHCACHE_NULL;
+			dmc->candidates[j].lru_prev = FLASHCACHE_NULL;
+		}
+		spin_unlock(&dmc->cache_sets[i].set_spin_lock);
+	}
+}
+
+void flashcache_reclaim_larc_switch(struct cache_c *dmc)
+{
+	/* only avaiable when reclaim policy is LRU */
+	if (dmc->sysctl_reclaim_policy != FLASHCACHE_LRU) {
+		dmc->sysctl_larc_enable = 0;
+		return;
+	}
+	if (dmc->sysctl_larc_enable == 0) {
+		dmc->sysctl_lru_hot_pct = 75;
+	} else {
+		dmc->sysctl_lru_hot_pct = 100;
+		flashcache_larc_init(dmc);
+	}
+	flashcache_reclaim_rebalance_lru(dmc, dmc->sysctl_lru_hot_pct);
+}
+/* */

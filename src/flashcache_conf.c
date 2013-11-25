@@ -2,6 +2,8 @@
  *  flashcache_conf.c
  *  FlashCache: Device mapper target for block-level disk caching
  *
+ *  Copyright 2013 Sai Huang (seth.hg@gmail.com)
+ *
  *  Copyright 2010 Facebook, Inc.
  *  Author: Mohan Srinivasan (mohan@fb.com)
  *
@@ -1073,6 +1075,10 @@ flashcache_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		flashcache_writethrough_create(dmc);
 
 init:
+	/* ADDED by seth */
+	dmc->candidate_min_capacity = dmc->assoc / 10;
+	dmc->candidate_max_capacity = (dmc->assoc * 9) / 10;
+	/* */
 	dmc->num_sets = dmc->size >> dmc->assoc_shift;
 	order = dmc->num_sets * sizeof(struct cache_set);
 	dmc->cache_sets = (struct cache_set *)vmalloc(order);
@@ -1092,6 +1098,12 @@ init:
 		dmc->cache_sets[i].hotlist_lru_head = FLASHCACHE_NULL;
 		dmc->cache_sets[i].warmlist_lru_tail = FLASHCACHE_NULL;
 		dmc->cache_sets[i].warmlist_lru_head = FLASHCACHE_NULL;
+		/* ADDED by seth for LARC */
+		dmc->cache_sets[i].candidate_lru_head = FLASHCACHE_NULL;
+		dmc->cache_sets[i].candidate_lru_tail = FLASHCACHE_NULL;
+		dmc->cache_sets[i].candidate_lru_len = 0;
+		dmc->cache_sets[i].candidate_lru_capacity = dmc->candidate_min_capacity;
+		/* */
 		spin_lock_init(&dmc->cache_sets[i].set_spin_lock);
 	}
 	
@@ -1167,6 +1179,11 @@ init:
 	dmc->sysctl_lru_hot_pct = 75;
 	dmc->sysctl_lru_promote_thresh = 2;
 	dmc->sysctl_new_style_write_merge = 0;
+	/* ADDED by seth for LARC */
+	dmc->sysctl_larc_enable = 0;
+	dmc->sysctl_larc_read_only = 0;
+	dmc->sysctl_larc_candidate_pct = 0;
+	/* */
 
 	/* Sequential i/o spotting */	
 	for (i = 0; i < SEQUENTIAL_TRACKER_QUEUE_DEPTH; i++) {
@@ -1213,6 +1230,20 @@ init:
 	dmc->num_whitelist_pids = 0;
 	dmc->num_blacklist_pids = 0;
 
+	/* ADDED by seth for LARC
+	 *   FIXME: allocate only when reclaim policy set to LARC
+	 * */
+	dmc->candidates = dm_vcalloc(dmc->size, sizeof(struct candidate));
+	if (!dmc->candidates)
+		goto bad3;
+
+	for (i = 0; i < dmc->size; i++) {
+		dmc->candidates[i].dbn = 0;
+		dmc->candidates[i].state = INVALID;
+		dmc->candidates[i].lru_next = FLASHCACHE_NULL;
+		dmc->candidates[i].lru_prev = FLASHCACHE_NULL;
+	}
+	/* */
 	flashcache_ctr_procfs(dmc);
 
 	return 0;
@@ -1366,6 +1397,11 @@ flashcache_dtr(struct dm_target *ti)
 	int nr_queued = 0;
 
 	flashcache_dtr_procfs(dmc);
+
+	/* ADDED by seth for LARC */
+	if (dmc->candidates)
+		vfree(dmc->candidates);
+	/* */
 
 	if (dmc->cache_mode == FLASHCACHE_WRITE_BACK) {
 		flashcache_sync_for_remove(dmc);

@@ -2,6 +2,8 @@
  *  flashcache_main.c
  *  FlashCache: Device mapper target for block-level disk caching
  *
+ *  Copyright 2013 Sai Huang (seth.hg@gmail.com)
+ *
  *  Copyright 2010 Facebook, Inc.
  *  Author: Mohan Srinivasan (mohan@fb.com)
  *
@@ -618,6 +620,89 @@ find_reclaim_dbn(struct cache_c *dmc, int start_index, int *index)
 		flashcache_reclaim_lru_get_old_block(dmc, start_index, index);
 }
 
+/* ADDED by seth for LARC */
+/* find and remove a block in candidate list */
+static int candidate_find(struct cache_c *dmc, sector_t dbn, unsigned long set_number, int *index)
+{
+	struct cache_set *set = &dmc->cache_sets[set_number];
+	struct candidate *candidate;
+	int start_idx = dmc->assoc * set_number;
+	int end_idx = start_idx + dmc->assoc;
+	int i, invalid = -1;
+
+	for (i = start_idx ; i < end_idx ; i++) {
+		candidate = dmc->candidates + i;
+		if (dbn == candidate->dbn && candidate->state == VALID) {
+			*index = i;
+			/* remove it from candidate list */
+			if (candidate->lru_prev == FLASHCACHE_NULL)
+				set->candidate_lru_head = candidate->lru_next;
+			else
+				dmc->candidates[start_idx+candidate->lru_prev].lru_next
+			       		= candidate->lru_next;
+			if (candidate->lru_next == FLASHCACHE_NULL)
+				set->candidate_lru_tail = candidate->lru_prev;
+			else
+				dmc->candidates[start_idx+candidate->lru_next].lru_prev
+			       		= candidate->lru_prev;
+			candidate->state = INVALID;
+			set->candidate_lru_len -= 1;
+			return VALID;
+		}
+		/* find an invalid slot */
+		if (invalid == -1 && candidate->state == INVALID)
+			invalid = i;
+	}
+
+	*index = invalid;
+	
+	return INVALID;
+}
+
+/* add a block to candidate list */
+static void candidate_add(struct cache_c *dmc, sector_t dbn, unsigned long set_number, int invalid)
+{
+	struct cache_set *set = &dmc->cache_sets[set_number];
+	struct candidate *candidate;
+	int start_idx = dmc->assoc * set_number;
+	int candidate_lru_capacity = dmc->sysctl_larc_candidate_pct ? 
+		dmc->assoc * dmc->sysctl_larc_candidate_pct / 100:
+		set->candidate_lru_capacity;
+
+	if (invalid == -1 || set->candidate_lru_len >= candidate_lru_capacity) {
+		invalid = start_idx + set->candidate_lru_head;
+		candidate = &dmc->candidates[invalid];
+		set->candidate_lru_head = candidate->lru_next;
+		dmc->candidates[start_idx + candidate->lru_next].lru_prev = FLASHCACHE_NULL;
+		candidate->lru_next = candidate->lru_prev = FLASHCACHE_NULL;
+		candidate->state = INVALID;
+		set->candidate_lru_len -= 1;
+	}
+	candidate = dmc->candidates + invalid;
+	candidate->state = VALID;
+	candidate->dbn = dbn;
+	/* add to the tail of candidate list */
+	candidate->lru_next = FLASHCACHE_NULL;
+	candidate->lru_prev = set->candidate_lru_tail;
+	if (set->candidate_lru_tail == FLASHCACHE_NULL)
+		set->candidate_lru_head = invalid - start_idx;
+	else
+		dmc->candidates[start_idx+set->candidate_lru_tail].lru_next = invalid - start_idx;
+	set->candidate_lru_tail = invalid - start_idx;
+	set->candidate_lru_len += 1;
+
+	if (set->candidate_lru_len > candidate_lru_capacity) {
+		/* remove a block from the head of the candidate list */
+		candidate = &dmc->candidates[start_idx + set->candidate_lru_head];
+		set->candidate_lru_head = candidate->lru_next;
+		dmc->candidates[start_idx + candidate->lru_next].lru_prev = FLASHCACHE_NULL;
+		candidate->lru_next = candidate->lru_prev = FLASHCACHE_NULL;
+		candidate->state = INVALID;
+		set->candidate_lru_len -= 1;
+	}
+}
+/* */
+
 /* 
  * dbn is the starting sector, io_size is the number of sectors.
  */
@@ -631,19 +716,57 @@ flashcache_lookup(struct cache_c *dmc, struct bio *bio, int *index)
 	unsigned long set_number = hash_block(dmc, dbn);
 	int invalid, oldest_clean = -1;
 	int start_index;
+	/* ADDED by seth */
+	int delta, ret;
+	int candidate_idx = -1;
+	int rw = (bio_data_dir(bio) == WRITE);
+	struct cache_set *set = &dmc->cache_sets[set_number];
+	/* */
 
 	start_index = dmc->assoc * set_number;
 	DPRINTK("Cache lookup : dbn %llu(%lu), set = %d",
 		dbn, io_size, set_number);
 	find_valid_dbn(dmc, dbn, start_index, index);
 	if (*index >= 0) {
+		/* ADDED by seth:
+		 *   decrease candidate_lru_capacity
+		 * */
+		if (dmc->sysctl_larc_enable && dmc->sysctl_larc_candidate_pct == 0) {
+			delta = dmc->assoc / (dmc->assoc - set->candidate_lru_capacity);
+			if (set->candidate_lru_capacity < dmc->candidate_min_capacity + delta)
+				set->candidate_lru_capacity = dmc->candidate_min_capacity;
+			else
+				set->candidate_lru_capacity -= delta;
+		}
 		DPRINTK("Cache lookup HIT: Block %llu(%lu): VALID index %d",
 			     dbn, io_size, *index);
 		/* We found the exact range of blocks we are looking for */
 		return VALID;
 	}
+	/* ADDED by seth
+	 *   increase candidate_lru_capacity
+	 * */
+	if (dmc->sysctl_larc_enable && dmc->sysctl_larc_candidate_pct == 0) {
+		delta = dmc->assoc / set->candidate_lru_capacity;
+		if (set->candidate_lru_capacity + delta > dmc->candidate_max_capacity)
+			set->candidate_lru_capacity = dmc->candidate_max_capacity;
+		else
+			set->candidate_lru_capacity += delta;
+	}
+	/* */
 	invalid = find_invalid_dbn(dmc, set_number);
 	if (invalid == -1) {
+		/* ADDED by seth for LARC */
+		if (dmc->sysctl_larc_enable) {
+			ret = candidate_find(dmc, dbn, set_number, &candidate_idx);
+			/* do not cache this block if it is not in the candidate list
+		 	 * */
+			if (ret == INVALID && (dmc->sysctl_larc_read_only == 0 || rw == 0)) {
+				candidate_add(dmc, dbn, set_number, candidate_idx);
+				return -1;
+			}
+		}
+		/* */
 		/* We didn't find an invalid entry, search for oldest valid entry */
 		find_reclaim_dbn(dmc, start_index, &oldest_clean);
 	}
@@ -669,6 +792,11 @@ flashcache_lookup(struct cache_c *dmc, struct bio *bio, int *index)
 		return INVALID;
 	else {
 		dmc->flashcache_stats.noroom++;
+		/* ADDED by seth: 
+	 	 *   if allocation failed, put the block into candidate list
+	 	 * */
+		candidate_add(dmc, dbn, set_number, candidate_idx);
+		/* */
 		return -1;
 	}
 }
